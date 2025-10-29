@@ -4,26 +4,29 @@
 // Motion targets
 static constexpr float CDR_MAX_SPEED_MPS = 0.90f;
 static constexpr float CDR_MIN_SPEED_MPS = 0.30f;
-static constexpr float DEFAULT_FWD_SPEED  = 0.50f;   // tune to meet CDR forward speed
-static constexpr float MIN_TURN_RADIUS_M  = 0.50f;   // set 0.0f to pivot in place for sharper correction
+static constexpr float DEFAULT_FWD_SPEED  = 0.50f;   // tune to meet your CDR spec
+static constexpr float MIN_TURN_RADIUS_M  = 0.50f;   // set 0.0f to pivot in place
 static constexpr float TRACK_WIDTH_M      = 0.130f;  // wheel track (m)
 
-// IR sensors (ADC) — LEFT/CENTER/RIGHT
-static constexpr int PIN_LEFT   = 4; // ADC
-static constexpr int PIN_CENTER = 2; // ADC
-static constexpr int PIN_RIGHT  = 3; // ADC
+// IR sensors (ADC) — LEFT/CENTER/RIGHT  (per your pinout)
+static constexpr int PIN_LEFT   = 4; // ADC1_CH4
+static constexpr int PIN_CENTER = 2; // ADC1_CH2
+static constexpr int PIN_RIGHT  = 3; // ADC1_CH3
 
-// Thresholds (tune to your surface)
-static int THRESH     = 900;   // >THRESH => BLACK
-static int DEAD_BAND  = 80;    // hysteresis around THRESH
+// Thresholds (tune on your surface using Serial prints)
+static int THRESH     = 900;   // >THRESH => BLACK (12-bit ADC)
+static int DEAD_BAND  = 80;    // hysteresis to reduce chatter
 static int AVG_N      = 8;     // averaging samples
 
-// DRV8833 (two-input mode) — DIR on two pins; PWM only on IN1 pins
-static constexpr uint8_t AIN1 = 5;  // Left DIR1 (PWM pin)
-static constexpr uint8_t AIN2 = 6;  // Left DIR2 (opposite level)
-static constexpr uint8_t BIN1 = 7;  // Right DIR1 (PWM pin)
-static constexpr uint8_t BIN2 = 8;  // Right DIR2 (opposite level)
-// nSLEEP: tie to 3.3V on hardware (or wire to a free IO and drive HIGH in setup())
+// Motor driver: IN1..IN4 board (your DRV8833 breakout)
+static constexpr uint8_t IN1 = 5;   // Left A  (GPIO5)
+static constexpr uint8_t IN2 = 6;   // Left B  (GPIO6)
+static constexpr uint8_t IN3 = 21;  // Right A (GPIO21)
+static constexpr uint8_t IN4 = 22;  // Right B (GPIO22)
+
+// Control loop
+static constexpr uint8_t  DUTY_SLEW_PER_TICK = 6;   // smoothing
+static constexpr uint32_t CONTROL_PERIOD_MS  = 10;  // 100 Hz
 
 /* ============== TYPES & INTERNALS ============== */
 enum class Command { IDLE, FWD, LEFT, RIGHT, HALT };
@@ -34,9 +37,7 @@ struct Sense {
 };
 
 static Command lastCmd = Command::FWD;
-static uint8_t dutyL = 0, dutyR = 0; // 0..255
-static constexpr uint8_t  DUTY_SLEW_PER_TICK = 6;   // smoothing
-static constexpr uint32_t CONTROL_PERIOD_MS  = 10;  // 100 Hz control
+static uint8_t dutyL_A = 0, dutyL_B = 0, dutyR_A = 0, dutyR_B = 0; // 0..255
 
 static inline uint8_t pwmFromSpeed(float v_mps) {
   if (v_mps < 0) v_mps = 0;
@@ -52,25 +53,27 @@ static inline void slewTo(uint8_t &cur, int target) {
   cur = (uint8_t)((int)cur + d);
 }
 
-/* ============== LOW-LEVEL DRIVE (DRV8833) ============== */
-static inline void driveSide(uint8_t in1, uint8_t in2, int signedDuty) {
-  signedDuty = constrain(signedDuty, -255, 255);
-  bool fwd = (signedDuty >= 0);
-  uint8_t mag = (uint8_t)abs(signedDuty);
-  // Two-input mode: set direction via levels, PWM on in1
-  digitalWrite(in1, fwd ? HIGH : LOW);
-  digitalWrite(in2, fwd ? LOW  : HIGH);
-  analogWrite(in1, mag);
+/* ============== LOW-LEVEL DRIVE (IN1..IN4) ============== */
+static inline void writeDuty(uint8_t pin, uint8_t duty) { analogWrite(pin, duty); }
+
+static void driveRaw(int lA, int lB, int rA, int rB) { // each 0..255
+  slewTo(dutyL_A, lA); slewTo(dutyL_B, lB);
+  slewTo(dutyR_A, rA); slewTo(dutyR_B, rB);
+  writeDuty(IN1, dutyL_A);
+  writeDuty(IN2, dutyL_B);
+  writeDuty(IN3, dutyR_A);
+  writeDuty(IN4, dutyR_B);
 }
 
-static void setWheelDutySigned(int leftDuty, int rightDuty) {
-  uint8_t tgtL = (uint8_t)abs(constrain(leftDuty,  -255, 255));
-  uint8_t tgtR = (uint8_t)abs(constrain(rightDuty, -255, 255));
-  uint8_t nextL = dutyL, nextR = dutyR;
-  slewTo(nextL, tgtL); slewTo(nextR, tgtR);
-  dutyL = nextL; dutyR = nextR;
-  driveSide(AIN1, AIN2, (leftDuty  >= 0) ? dutyL : -((int)dutyL));
-  driveSide(BIN1, BIN2, (rightDuty >= 0) ? dutyR : -((int)dutyR));
+// Signed duties: forward = +, reverse = -
+static void setWheelDutySigned(int leftDuty, int rightDuty) { // -255..255
+  leftDuty  = constrain(leftDuty,  -255, 255);
+  rightDuty = constrain(rightDuty, -255, 255);
+  int lA = leftDuty  > 0 ? leftDuty  : 0;   // left forward on IN1
+  int lB = leftDuty  < 0 ? -leftDuty : 0;   // left reverse on IN2
+  int rA = rightDuty > 0 ? rightDuty : 0;   // right forward on IN3
+  int rB = rightDuty < 0 ? -rightDuty: 0;   // right reverse on IN4
+  driveRaw(lA, lB, rA, rB);
 }
 
 static void setWheelSpeeds(float vL, float vR) {
@@ -91,7 +94,7 @@ static void kinematicTurn(float v_forward_mps, float radius_m, bool leftTurn) {
   radius_m = max(0.0f, radius_m);
   const float W = TRACK_WIDTH_M;
 
-  if (radius_m == 0.0f) { // pivot
+  if (radius_m == 0.0f) { // pivot in place
     float v = min(CDR_MAX_SPEED_MPS*0.5f, max(CDR_MIN_SPEED_MPS*0.5f, 0.3f));
     float vL =  leftTurn ? -v :  v;
     float vR =  leftTurn ?  v : -v;
@@ -129,42 +132,45 @@ static Sense readSensors() {
 }
 
 static Command decide(const Sense& S) {
-  if (S.Cb)              return Command::FWD;    // line centered → go straight
+  if (S.Cb)              return Command::FWD;    // centered → straight
   if (S.Rb && !S.Lb)     return Command::RIGHT;  // line to right → steer right
   if (S.Lb && !S.Rb)     return Command::LEFT;   // line to left  → steer left
   if (S.Lb && S.Rb)      return Command::FWD;    // intersection → prefer straight
-  return lastCmd;                                  // lost line → keep last correction
+  return lastCmd;                                  // lost → keep last correction
 }
 
 /* ============== SETUP / LOOP ============== */
 void setup() {
-  // PWM setup on the two PWM pins (AIN1, BIN1)
+  // PWM setup on all four motor pins (ESP32-C6 per-pin API)
   const uint8_t  RES  = 8;      // 0..255
   const uint32_t FREQ = 20000;  // 20 kHz
-  analogWriteResolution(AIN1, RES);
-  analogWriteResolution(BIN1, RES);
-  analogWriteFrequency(AIN1, FREQ);
-  analogWriteFrequency(BIN1, FREQ);
+  analogWriteResolution(IN1, RES);
+  analogWriteResolution(IN2, RES);
+  analogWriteResolution(IN3, RES);
+  analogWriteResolution(IN4, RES);
+  analogWriteFrequency(IN1, FREQ);
+  analogWriteFrequency(IN2, FREQ);
+  analogWriteFrequency(IN3, FREQ);
+  analogWriteFrequency(IN4, FREQ);
 
-  pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
-  pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
 
   analogReadResolution(12); // 0..4095
-
   setWheelDutySigned(0,0);
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nESP32-C6 Sensor-only Motion (DRV8833 two-input)");
-  Serial.println("IR: IO4(L), IO2(C), IO3(R)");
+  Serial.println("\nESP32-C6 Sensor-only Motion (IN1..IN4 driver)");
+  Serial.println("IR: GPIO4(L), GPIO2(C), GPIO3(R)");
+  Serial.println("Motor INs: GPIO5(IN1), GPIO6(IN2), GPIO21(IN3), GPIO22(IN4)");
 }
 
 void loop() {
-  // Sense → decide → act. Keeps turning until center sees line, then forward.
   Sense S = readSensors();
   Command next = decide(S);
 
-  // Debug (comment out if noisy)
+  // Debug (optional)
   Serial.print("L="); Serial.print(S.vL); Serial.print(S.Lb ? "(B) " : "(w) ");
   Serial.print("C="); Serial.print(S.vC); Serial.print(S.Cb ? "(B) " : "(w) ");
   Serial.print("R="); Serial.print(S.vR); Serial.print(S.Rb ? "(B) " : "(w) ");
