@@ -1,34 +1,43 @@
 #include <Arduino.h>
 
 /* ================== CONFIG ================== */
-// Motion targets
+// --- Start/Stop mechanism ---
+#define BUTTON_PIN 9   // Change this to your actual button pin
+#define LED_PIN 8      // LED indicator pin
+
+// --- Motion parameters ---
 static constexpr float CDR_MAX_SPEED_MPS = 0.90f;
 static constexpr float CDR_MIN_SPEED_MPS = 0.30f;
-static constexpr float DEFAULT_FWD_SPEED  = 0.50f;   // tune to meet your CDR spec
-static constexpr float MIN_TURN_RADIUS_M  = 0.50f;   // set 0.0f to pivot in place
-static constexpr float TRACK_WIDTH_M      = 0.130f;  // wheel track (m)
+static constexpr float DEFAULT_FWD_SPEED  = 0.50f;
+static constexpr float MIN_TURN_RADIUS_M  = 0.50f;
+static constexpr float TRACK_WIDTH_M      = 0.130f;
 
-// IR sensors (ADC) — LEFT/CENTER/RIGHT  (per your pinout)
-static constexpr int PIN_LEFT   = 4; // ADC1_CH4
-static constexpr int PIN_CENTER = 2; // ADC1_CH2
-static constexpr int PIN_RIGHT  = 3; // ADC1_CH3
+// IR sensors
+static constexpr int PIN_LEFT   = 4;
+static constexpr int PIN_CENTER = 2;
+static constexpr int PIN_RIGHT  = 3;
 
-// Thresholds (tune on your surface using Serial prints)
-static int THRESH     = 900;   // >THRESH => BLACK (12-bit ADC)
-static int DEAD_BAND  = 80;    // hysteresis to reduce chatter
-static int AVG_N      = 8;     // averaging samples
+// Thresholds
+static int THRESH     = 900;
+static int DEAD_BAND  = 80;
+static int AVG_N      = 8;
 
-// Motor driver: IN1..IN4 board (your DRV8833 breakout)
-static constexpr uint8_t IN1 = 5;   // Left A  (GPIO5)
-static constexpr uint8_t IN2 = 6;   // Left B  (GPIO6)
-static constexpr uint8_t IN3 = 21;  // Right A (GPIO21)
-static constexpr uint8_t IN4 = 22;  // Right B (GPIO22)
+// Motor driver pins (DRV8833)
+static constexpr uint8_t IN1 = 5;   // Left A
+static constexpr uint8_t IN2 = 6;   // Left B
+static constexpr uint8_t IN3 = 21;  // Right A
+static constexpr uint8_t IN4 = 22;  // Right B
 
-// Control loop
-static constexpr uint8_t  DUTY_SLEW_PER_TICK = 6;   // smoothing
-static constexpr uint32_t CONTROL_PERIOD_MS  = 10;  // 100 Hz
+// Control timing
+static constexpr uint32_t CONTROL_PERIOD_MS  = 10;
 
-/* ============== TYPES & INTERNALS ============== */
+// --- Start/Stop variables ---
+bool systemOn = false;
+bool lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 200;
+
+/* ================== ROBOT CONTROL TYPES ================== */
 enum class Command { IDLE, FWD, LEFT, RIGHT, HALT };
 
 struct Sense {
@@ -37,26 +46,25 @@ struct Sense {
 };
 
 static Command lastCmd = Command::FWD;
-static uint8_t dutyL_A = 0, dutyL_B = 0, dutyR_A = 0, dutyR_B = 0; // 0..255
+static uint8_t dutyL_A = 0, dutyL_B = 0, dutyR_A = 0, dutyR_B = 0;
 
+/* ================== MOTOR CONTROL ================== */
 static inline uint8_t pwmFromSpeed(float v_mps) {
-  if (v_mps < 0) v_mps = 0;
-  if (v_mps > CDR_MAX_SPEED_MPS) v_mps = CDR_MAX_SPEED_MPS;
+  v_mps = constrain(v_mps, 0, CDR_MAX_SPEED_MPS);
   return (uint8_t)roundf(255.0f * (v_mps / CDR_MAX_SPEED_MPS));
 }
 
 static inline void slewTo(uint8_t &cur, int target) {
   target = constrain(target, 0, 255);
   int d = target - (int)cur;
-  if (d >  (int)DUTY_SLEW_PER_TICK) d =  DUTY_SLEW_PER_TICK;
-  if (d < -(int)DUTY_SLEW_PER_TICK) d = -DUTY_SLEW_PER_TICK;
+  if (d > 6) d = 6;
+  if (d < -6) d = -6;
   cur = (uint8_t)((int)cur + d);
 }
 
-/* ============== LOW-LEVEL DRIVE (IN1..IN4) ============== */
 static inline void writeDuty(uint8_t pin, uint8_t duty) { analogWrite(pin, duty); }
 
-static void driveRaw(int lA, int lB, int rA, int rB) { // each 0..255
+static void driveRaw(int lA, int lB, int rA, int rB) {
   slewTo(dutyL_A, lA); slewTo(dutyL_B, lB);
   slewTo(dutyR_A, rA); slewTo(dutyR_B, rB);
   writeDuty(IN1, dutyL_A);
@@ -65,16 +73,17 @@ static void driveRaw(int lA, int lB, int rA, int rB) { // each 0..255
   writeDuty(IN4, dutyR_B);
 }
 
-// Signed duties: forward = +, reverse = -
-static void setWheelDutySigned(int leftDuty, int rightDuty) { // -255..255
+static void setWheelDutySigned(int leftDuty, int rightDuty) {
   leftDuty  = constrain(leftDuty,  -255, 255);
   rightDuty = constrain(rightDuty, -255, 255);
-  int lA = leftDuty  > 0 ? leftDuty  : 0;   // left forward on IN1
-  int lB = leftDuty  < 0 ? -leftDuty : 0;   // left reverse on IN2
-  int rA = rightDuty > 0 ? rightDuty : 0;   // right forward on IN3
-  int rB = rightDuty < 0 ? -rightDuty: 0;   // right reverse on IN4
+  int lA = leftDuty  > 0 ? leftDuty  : 0;
+  int lB = leftDuty  < 0 ? -leftDuty : 0;
+  int rA = rightDuty > 0 ? rightDuty : 0;
+  int rB = rightDuty < 0 ? -rightDuty: 0;
   driveRaw(lA, lB, rA, rB);
 }
+
+static void stopMotors() { setWheelDutySigned(0, 0); }
 
 static void setWheelSpeeds(float vL, float vR) {
   int dL = (int)pwmFromSpeed(fabsf(vL));
@@ -84,25 +93,24 @@ static void setWheelSpeeds(float vL, float vR) {
   setWheelDutySigned(dL, dR);
 }
 
-/* ============== MOTION API ============== */
-static void moveForward(float speed_mps = DEFAULT_FWD_SPEED) {
-  speed_mps = min(CDR_MAX_SPEED_MPS, max(CDR_MIN_SPEED_MPS, speed_mps));
-  setWheelSpeeds(speed_mps, speed_mps);
+/* ================== MOVEMENT ================== */
+static void moveForward(float speed = DEFAULT_FWD_SPEED) {
+  speed = constrain(speed, CDR_MIN_SPEED_MPS, CDR_MAX_SPEED_MPS);
+  setWheelSpeeds(speed, speed);
 }
 
-static void kinematicTurn(float v_forward_mps, float radius_m, bool leftTurn) {
-  radius_m = max(0.0f, radius_m);
+static void kinematicTurn(float v_fwd, float radius, bool leftTurn) {
+  radius = max(0.0f, radius);
   const float W = TRACK_WIDTH_M;
-
-  if (radius_m == 0.0f) { // pivot in place
-    float v = min(CDR_MAX_SPEED_MPS*0.5f, max(CDR_MIN_SPEED_MPS*0.5f, 0.3f));
+  if (radius == 0.0f) {
+    float v = min(CDR_MAX_SPEED_MPS * 0.5f, max(CDR_MIN_SPEED_MPS * 0.5f, 0.3f));
     float vL =  leftTurn ? -v :  v;
     float vR =  leftTurn ?  v : -v;
     setWheelSpeeds(vL, vR);
     return;
   }
-  float v = min(CDR_MAX_SPEED_MPS, max(CDR_MIN_SPEED_MPS, v_forward_mps));
-  float twoR = 2.0f * radius_m;
+  float v = min(CDR_MAX_SPEED_MPS, max(CDR_MIN_SPEED_MPS, v_fwd));
+  float twoR = 2.0f * radius;
   float vL = v * (twoR - W) / twoR;
   float vR = v * (twoR + W) / twoR;
   if (!leftTurn) { float t = vL; vL = vR; vR = t; }
@@ -112,10 +120,9 @@ static void kinematicTurn(float v_forward_mps, float radius_m, bool leftTurn) {
 static inline void turnLeft (float fwd = DEFAULT_FWD_SPEED, float R = MIN_TURN_RADIUS_M)  { kinematicTurn(fwd, R, true);  }
 static inline void turnRight(float fwd = DEFAULT_FWD_SPEED, float R = MIN_TURN_RADIUS_M)  { kinematicTurn(fwd, R, false); }
 
-/* ============== SENSING ============== */
+/* ================== SENSOR READING ================== */
 static int readAvg(int pin, int N=AVG_N) {
-  long s = 0;
-  for (int i=0;i<N;++i) s += analogRead(pin);
+  long s = 0; for (int i=0;i<N;++i) s += analogRead(pin);
   return (int)(s / N);
 }
 
@@ -124,7 +131,6 @@ static Sense readSensors() {
   S.vL = readAvg(PIN_LEFT);
   S.vC = readAvg(PIN_CENTER);
   S.vR = readAvg(PIN_RIGHT);
-  // hysteresis around THRESH
   S.Lb = (S.vL > THRESH + DEAD_BAND);
   S.Cb = (S.vC > THRESH + DEAD_BAND);
   S.Rb = (S.vR > THRESH + DEAD_BAND);
@@ -132,61 +138,68 @@ static Sense readSensors() {
 }
 
 static Command decide(const Sense& S) {
-  if (S.Cb)              return Command::FWD;    // centered → straight
-  if (S.Rb && !S.Lb)     return Command::RIGHT;  // line to right → steer right
-  if (S.Lb && !S.Rb)     return Command::LEFT;   // line to left  → steer left
-  if (S.Lb && S.Rb)      return Command::FWD;    // intersection → prefer straight
-  return lastCmd;                                  // lost → keep last correction
+  if (S.Cb)              return Command::FWD;
+  if (S.Rb && !S.Lb)     return Command::RIGHT;
+  if (S.Lb && !S.Rb)     return Command::LEFT;
+  if (S.Lb && S.Rb)      return Command::FWD;
+  return lastCmd;
 }
 
-/* ============== SETUP / LOOP ============== */
+/* ================== SETUP ================== */
 void setup() {
-  // PWM setup on all four motor pins (ESP32-C6 per-pin API)
-  const uint8_t  RES  = 8;      // 0..255
-  const uint32_t FREQ = 20000;  // 20 kHz
-  analogWriteResolution(IN1, RES);
-  analogWriteResolution(IN2, RES);
-  analogWriteResolution(IN3, RES);
-  analogWriteResolution(IN4, RES);
-  analogWriteFrequency(IN1, FREQ);
-  analogWriteFrequency(IN2, FREQ);
-  analogWriteFrequency(IN3, FREQ);
-  analogWriteFrequency(IN4, FREQ);
-
-  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
-
-  analogReadResolution(12); // 0..4095
-  setWheelDutySigned(0,0);
-
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nESP32-C6 Sensor-only Motion (IN1..IN4 driver)");
-  Serial.println("IR: GPIO4(L), GPIO2(C), GPIO3(R)");
-  Serial.println("Motor INs: GPIO5(IN1), GPIO6(IN2), GPIO21(IN3), GPIO22(IN4)");
+  Serial.println("\nESP32-C6 Line Follower + Start/Stop");
+
+  // Button + LED
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  // Motor driver pins
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  analogReadResolution(12);
+  stopMotors();
+
+  Serial.println("Press button to start/stop the robot.");
 }
 
+/* ================== LOOP ================== */
 void loop() {
-  Sense S = readSensors();
-  Command next = decide(S);
+  // --- Button debounce logic ---
+  int buttonState = digitalRead(BUTTON_PIN);
+  if (buttonState != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (buttonState == LOW && lastButtonState == HIGH) {
+      systemOn = !systemOn;
+      if (systemOn) {
+        digitalWrite(LED_PIN, HIGH);
+        Serial.println("System ON");
+      } else {
+        digitalWrite(LED_PIN, LOW);
+        stopMotors();
+        Serial.println("System OFF");
+      }
+    }
+  }
+  lastButtonState = buttonState;
 
-  // Debug (optional)
-  Serial.print("L="); Serial.print(S.vL); Serial.print(S.Lb ? "(B) " : "(w) ");
-  Serial.print("C="); Serial.print(S.vC); Serial.print(S.Cb ? "(B) " : "(w) ");
-  Serial.print("R="); Serial.print(S.vR); Serial.print(S.Rb ? "(B) " : "(w) ");
-  Serial.print(" -> ");
-  if      (next == Command::FWD)   Serial.println("FWD");
-  else if (next == Command::LEFT)  Serial.println("LEFT");
-  else if (next == Command::RIGHT) Serial.println("RIGHT");
-  else                              Serial.println("HOLD");
-
-  switch (next) {
-    case Command::FWD:   moveForward(DEFAULT_FWD_SPEED); break;
-    case Command::LEFT:  turnLeft (DEFAULT_FWD_SPEED, MIN_TURN_RADIUS_M); break;
-    case Command::RIGHT: turnRight(DEFAULT_FWD_SPEED, MIN_TURN_RADIUS_M); break;
-    default:             setWheelDutySigned(0,0); break;
+  // --- Only run motion logic if system is ON ---
+  if (systemOn) {
+    Sense S = readSensors();
+    Command next = decide(S);
+    switch (next) {
+      case Command::FWD:   moveForward(); break;
+      case Command::LEFT:  turnLeft();    break;
+      case Command::RIGHT: turnRight();   break;
+      default:             stopMotors();  break;
+    }
+    lastCmd = next;
   }
 
-  lastCmd = next;
   delay(CONTROL_PERIOD_MS);
 }
+
