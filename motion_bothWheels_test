@@ -1,0 +1,39 @@
+#include <Arduino.h>
+
+// Motor pins
+const int IN1 = 5;    // Left A
+const int IN2 = 6;    // Left B
+const int IN3 = 21;   // Right A
+const int IN4 = 22;   // Right B
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("DRV8833 both-wheel test");
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  // make sure they start off
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  delay(1000);
+}
+
+void loop() {
+  Serial.println("Both FORWARD");
+  analogWrite(IN1, 200);  analogWrite(IN2, 0);
+  analogWrite(IN3, 200);  analogWrite(IN4, 0);
+  delay(2000);
+
+  Serial.println("Both REVERSE");
+  analogWrite(IN1, 0);    analogWrite(IN2, 200);
+  analogWrite(IN3, 0);    analogWrite(IN4, 200);
+  delay(2000);
+
+  Serial.println("STOP");
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  delay(2000);
+}
