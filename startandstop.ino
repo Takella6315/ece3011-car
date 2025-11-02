@@ -1,48 +1,40 @@
-// --- Start/Stop Mechanism for ESP32-C6 ---
-// Works with RF relay or push button + DRV8833
-
-#define BUTTON_PIN 5      // Input from relay COM or push button
-#define LED_PIN 4         // LED indicator (onboard or external)
-#define MOTOR_AIN1 18     // DRV8833 motor driver input 1
-#define MOTOR_AIN2 19     // DRV8833 motor driver input 2
+#define BUTTON_PIN 5      // Input from push button
+#define LED_PIN 4
+#define MOTOR_AIN1 18
+#define MOTOR_AIN2 19
+#define MOTOR_BIN1 21     // if you have second motor
+#define MOTOR_BIN2 22
 
 bool systemOn = false;
 bool lastButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
-const unsigned long debounceDelay = 200;
+const unsigned long debounceDelay = 50;  // shorter debounce usually enough
 
 void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   pinMode(MOTOR_AIN1, OUTPUT);
   pinMode(MOTOR_AIN2, OUTPUT);
+  pinMode(MOTOR_BIN1, OUTPUT);
+  pinMode(MOTOR_BIN2, OUTPUT);
 
   digitalWrite(LED_PIN, LOW);
   stopMotor();
 
   Serial.begin(9600);
-  Serial.println("System ready. Press button or use remote to start/stop.");
 }
 
 void loop() {
   int buttonState = digitalRead(BUTTON_PIN);
 
-  if (buttonState != lastButtonState) {
-    lastDebounceTime = millis();
-  }
+  if (buttonState != lastButtonState) lastDebounceTime = millis();
 
   if ((millis() - lastDebounceTime) > debounceDelay) {
-    if (buttonState == LOW && lastButtonState == HIGH) {
+    if (buttonState == LOW && lastButtonState == HIGH) { // toggle on press
       systemOn = !systemOn;
-      if (systemOn) {
-        startMotor();
-        digitalWrite(LED_PIN, HIGH);
-        Serial.println("System ON");
-      } else {
-        stopMotor();
-        digitalWrite(LED_PIN, LOW);
-        Serial.println("System OFF");
-      }
+      digitalWrite(LED_PIN, systemOn ? HIGH : LOW);
+      if (systemOn) startMotor(); else stopMotor();
+      Serial.println(systemOn ? "System ON" : "System OFF");
     }
   }
 
@@ -52,9 +44,14 @@ void loop() {
 void startMotor() {
   digitalWrite(MOTOR_AIN1, HIGH);
   digitalWrite(MOTOR_AIN2, LOW);
+  digitalWrite(MOTOR_BIN1, HIGH); // second motor
+  digitalWrite(MOTOR_BIN2, LOW);
 }
 
 void stopMotor() {
   digitalWrite(MOTOR_AIN1, LOW);
   digitalWrite(MOTOR_AIN2, LOW);
+  digitalWrite(MOTOR_BIN1, LOW);
+  digitalWrite(MOTOR_BIN2, LOW);
 }
+
