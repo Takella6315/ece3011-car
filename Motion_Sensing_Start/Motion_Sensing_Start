@@ -2,43 +2,33 @@
 
 /* ========== PIN DEFINITIONS ========== */
 // IR sensors
-const int PIN_LEFT   = 4;   // ADC1_CH4
-const int PIN_CENTER = 2;   // ADC1_CH2
-const int PIN_RIGHT  = 3;   // ADC1_CH3
+const int PIN_LEFT   = 4;
+const int PIN_CENTER = 2;
+const int PIN_RIGHT  = 3;
 
 // Motor driver (DRV8833)
-const int IN1 = 5;    // Left motor input A
-const int IN2 = 6;    // Left motor input B
-const int IN3 = 21;   // Right motor input A
-const int IN4 = 22;   // Right motor input B
-
-// Start/Stop button and LED
-#define BUTTON_PIN  15   // example GPIO for start/stop button
-#define LED_PIN     4
+const int IN1 = 5;
+const int IN2 = 6;
+const int IN3 = 21;
+const int IN4 = 22;
 
 /* ========== CONSTANTS ========== */
-const int THRESH = 900;   // line sensor threshold
-const int AVG_N  = 8;
-const int BASE_SPEED = 180;   // forward speed
-const int TURN_SPEED = 150;   // turning speed
+const int THRESH = 900;   // black line threshold
+const int AVG_N = 8;
+const int BASE_SPEED = 180;
+const int TURN_SPEED = 150;
 
-/* ========== START/STOP VARIABLES ========== */
-bool systemOn = false;
-bool lastButtonState = HIGH;
-unsigned long lastDebounceTime = 0;
-const unsigned long debounceDelay = 50;
-
-/* ========== SENSOR READ ========== */
+/* ========== SENSOR READ FUNCTION ========== */
 int readAvg(int pin) {
   long s = 0;
   for (int i = 0; i < AVG_N; ++i) s += analogRead(pin);
   return (int)(s / AVG_N);
 }
 
-/* ========== MOTOR CONTROL ========== */
+/* ========== MOTOR CONTROL FUNCTIONS ========== */
 void stopMotors() {
-  analogWrite(IN1, 0); analogWrite(IN2, 0);
-  analogWrite(IN3, 0); analogWrite(IN4, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
 }
 
 void moveForward() {
@@ -47,13 +37,13 @@ void moveForward() {
 }
 
 void turnLeft() {
-  analogWrite(IN1, 0);          analogWrite(IN2, TURN_SPEED);  // left reverse
-  analogWrite(IN3, TURN_SPEED); analogWrite(IN4, 0);           // right forward
+  analogWrite(IN1, 0);          analogWrite(IN2, TURN_SPEED);
+  analogWrite(IN3, TURN_SPEED); analogWrite(IN4, 0);
 }
 
 void turnRight() {
-  analogWrite(IN1, TURN_SPEED); analogWrite(IN2, 0);           // left forward
-  analogWrite(IN3, 0);          analogWrite(IN4, TURN_SPEED);  // right reverse
+  analogWrite(IN1, TURN_SPEED); analogWrite(IN2, 0);
+  analogWrite(IN3, 0);          analogWrite(IN4, TURN_SPEED);
 }
 
 /* ========== SETUP ========== */
@@ -66,67 +56,47 @@ void setup() {
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(LED_PIN, OUTPUT);
 
   stopMotors();
 
   Serial.println("ESP32-C6 3-Sensor Line Follower Ready");
-  Serial.println("Press button to start/stop the system.");
+  Serial.println("Car will only move when the relay (controlled by remote) is ON.");
 }
 
 /* ========== MAIN LOOP ========== */
 void loop() {
-  // --- START/STOP BUTTON ---
-  int buttonState = digitalRead(BUTTON_PIN);
-  if (buttonState != lastButtonState) lastDebounceTime = millis();
+  // Read sensors
+  int vL = readAvg(PIN_LEFT);
+  int vC = readAvg(PIN_CENTER);
+  int vR = readAvg(PIN_RIGHT);
 
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    if (buttonState == LOW && lastButtonState == HIGH) {
-      systemOn = !systemOn;
-      digitalWrite(LED_PIN, systemOn ? HIGH : LOW);
-      Serial.println(systemOn ? "System ON" : "System OFF");
-      if (!systemOn) stopMotors();  // immediately stop if turned off
-    }
-  }
-  lastButtonState = buttonState;
+  bool L_black = (vL > THRESH);
+  bool C_black = (vC > THRESH);
+  bool R_black = (vR > THRESH);
 
-  // --- LINE FOLLOWING LOGIC ---
-  if (systemOn) {
-    int vL = readAvg(PIN_LEFT);
-    int vC = readAvg(PIN_CENTER);
-    int vR = readAvg(PIN_RIGHT);
+  // Print sensor readings
+  Serial.print("L="); Serial.print(vL); Serial.print(L_black ? "(B) " : "(w) ");
+  Serial.print("C="); Serial.print(vC); Serial.print(C_black ? "(B) " : "(w) ");
+  Serial.print("R="); Serial.print(vR); Serial.print(R_black ? "(B) " : "(w) ");
+  Serial.print(" → ");
 
-    bool L_black = (vL > THRESH);
-    bool C_black = (vC > THRESH);
-    bool R_black = (vR > THRESH);
-
-    Serial.print("L="); Serial.print(vL); Serial.print(L_black ? "(B) " : "(w) ");
-    Serial.print("C="); Serial.print(vC); Serial.print(C_black ? "(B) " : "(w) ");
-    Serial.print("R="); Serial.print(vR); Serial.print(R_black ? "(B) " : "(w) ");
-    Serial.print(" → ");
-
-    if (R_black && !L_black) {
-      turnRight();
-      Serial.println("RIGHT");
-    } 
-    else if (L_black && !R_black) {
-      turnLeft();
-      Serial.println("LEFT");
-    } 
-    else if (C_black) {
-      moveForward();
-      Serial.println("FORWARD");
-    } 
-    else {
-      stopMotors();
-      Serial.println("STOP");
-    }
-  }
+  // Decide motion
+  if (R_black && !L_black) {
+    turnRight();
+    Serial.println("RIGHT");
+  } 
+  else if (L_black && !R_black) {
+    turnLeft();
+    Serial.println("LEFT");
+  } 
+  else if (C_black) {
+    moveForward();
+    Serial.println("FORWARD");
+  } 
   else {
-    stopMotors();  // ensure motors stay stopped when system OFF
+    stopMotors();
+    Serial.println("STOP");
   }
 
   delay(50);
 }
-
