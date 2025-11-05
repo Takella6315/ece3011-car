@@ -15,7 +15,7 @@ const int SPEED_TURN = 200;   // in-place spin
 
 // Per-wheel trims (1.00 = no change)
 // Your left is faster → trim it DOWN slightly (e.g., 0.88..0.95)
-float TRIM_LEFT  = 0.6f;
+float TRIM_LEFT  = 0.7f;
 float TRIM_RIGHT = 1.00f;
 
 // Minimum PWM to break static friction (applied to nonzero commands)
