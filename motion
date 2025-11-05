@@ -1,0 +1,120 @@
+#include <Arduino.h>
+
+/* ================== DRV8833 PIN MAP (ESP32) ================== */
+// Left motor:  IN1/IN2
+// Right motor: IN3/IN4
+const int IN1 = 5;    // Left A
+const int IN2 = 6;    // Left B
+const int IN3 = 21;   // Right A
+const int IN4 = 22;   // Right B
+
+/* ================== SPEED / TRIM TUNING ================== */
+// Base speeds (0..255)
+const int SPEED_FWD  = 200;   // forward drive
+const int SPEED_TURN = 200;   // in-place spin
+
+// Per-wheel trims (1.00 = no change)
+// Your left is faster → trim it DOWN slightly (e.g., 0.88..0.95)
+float TRIM_LEFT  = 0.6f;
+float TRIM_RIGHT = 1.00f;
+
+// Minimum PWM to break static friction (applied to nonzero commands)
+const int MIN_PWM = 60;   // tune: 40..90 common
+
+/* ================== HELPERS ================== */
+static inline int applyTrimClamp(int duty, float trim) {
+  // Scale and clamp to 0..255; also apply MIN_PWM if nonzero
+  int d = (int)roundf(duty * trim);
+  if (d < 0) d = 0;
+  if (d > 255) d = 255;
+  if (d > 0 && d < MIN_PWM) d = MIN_PWM;
+  return d;
+}
+
+// Low-level per-wheel primitives
+static inline void leftForwardRaw (int duty) { analogWrite(IN1, duty); analogWrite(IN2, 0); }
+static inline void leftReverseRaw (int duty) { analogWrite(IN1, 0);    analogWrite(IN2, duty); }
+static inline void rightForwardRaw(int duty) { analogWrite(IN3, duty); analogWrite(IN4, 0); }
+static inline void rightReverseRaw(int duty) { analogWrite(IN3, 0);    analogWrite(IN4, duty); }
+
+// Trim-aware wrappers
+static inline void leftForward (int duty) { leftForwardRaw (applyTrimClamp(duty, TRIM_LEFT));  }
+static inline void leftReverse (int duty) { leftReverseRaw (applyTrimClamp(duty, TRIM_LEFT));  }
+static inline void rightForward(int duty) { rightForwardRaw(applyTrimClamp(duty, TRIM_RIGHT)); }
+static inline void rightReverse(int duty) { rightReverseRaw(applyTrimClamp(duty, TRIM_RIGHT)); }
+
+// Stop modes
+void motorsCoast() {
+  // Ensure PWM is zero, then drive LOW/LOW (freewheel)
+  analogWrite(IN1, 0); analogWrite(IN2, 0);
+  analogWrite(IN3, 0); analogWrite(IN4, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+void motorsBrake() {
+  // Ensure PWM is zero, then drive HIGH/HIGH (active brake)
+  analogWrite(IN1, 0); analogWrite(IN2, 0);
+  analogWrite(IN3, 0); analogWrite(IN4, 0);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, HIGH);
+}
+
+/* ================== MOTIONS ================== */
+void forward(int duty = SPEED_FWD) {
+  leftForward(duty);
+  rightForward(duty);
+}
+
+void turnLeft(int duty = SPEED_TURN) {
+  // In-place spin left
+  leftReverse(duty);
+  rightForward(duty);
+}
+
+void turnRight(int duty = SPEED_TURN) {
+  // In-place spin right
+  leftForward(duty);
+  rightReverse(duty);
+}
+
+void stopMotion(bool hardBrake = true) {
+  if (hardBrake) motorsBrake();
+  else           motorsCoast();
+}
+
+/* ================== DEMO ================== */
+void setup() {
+  Serial.begin(115200);
+  Serial.println("DRV8833 Motion Demo (trimmed forward, hard brake stop)");
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  motorsCoast();
+  delay(300);
+
+  // (Optional) On some ESP32 cores you can set PWM freq/res like this:
+  // analogWriteFrequency(IN1, 20000); analogWriteFrequency(IN2, 20000);
+  // analogWriteFrequency(IN3, 20000); analogWriteFrequency(IN4, 20000);
+}
+
+void loop() {
+  Serial.println("FORWARD (trimmed)");
+  forward();                 // both wheels, with trims
+  delay(2500);
+
+  Serial.println("TURN LEFT (spin)");
+  turnLeft();
+  delay(2000);
+
+  Serial.println("TURN RIGHT (spin)");
+  turnRight();
+  delay(2000);
+
+  Serial.println("STOP (hard brake)");
+  stopMotion(true);          // active brake
+  delay(1500);
+}
